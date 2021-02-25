@@ -1,0 +1,414 @@
+---
+title: "ISOM 673 Empirical Excersice 1"
+author: "Grace Zeng"
+date: "10/27/2020"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, echo = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE)
+library(readr)
+library(tidyr)
+library(igraph)
+library(dplyr)
+library(matrixcalc)
+library(rlist)
+library(sets)
+
+setwd("C:/Users/gtsan/OneDrive - Emory University/Emory Goizueta MSBA/ISOM673_Social_Network_Analytics/Assignments/Empirical_Exercise_1")
+
+dt <- read_csv("social_and_task_network.csv")
+nodes = unique(dt$ego)
+links <- gather(dt, type, weight, social_tie:task_tie,factor_key = TRUE)
+
+```
+
+Question 1
+First, consider the social and task ties as separate networks.
+```{r Q1Prep echo=FALSE}
+
+links_sub<-links[links$weight!=0,]
+names(links_sub)<-c("from","to","type","weight")
+# remove self-loop at the table
+links_sub<-links_sub[links_sub$from!=links_sub$to,]
+
+links_social = links_sub[links_sub$type=='social_tie',]
+links_task = links_sub[links_sub$type=='task_tie',]
+
+g_social = graph.data.frame(links_social, vertices = nodes, directed = TRUE)
+g_task = graph.data.frame(links_task, vertices = nodes, directed = TRUE)
+
+#remove self-loop by simplifying the graph
+g_social = simplify(g_social, remove.loops = TRUE)
+g_task = simplify(g_task, remove.loops = TRUE)
+
+g_social
+E(g_social)$type
+E(g_social)$weight
+plot(g_social, edge.arrow.size=.3)
+plot(g_task,edge.arrow.size=.3)
+```
+
+1.(A) Use igraph to generate indegree, outdegree, closeness, betweenness, and PageRank centrality
+statistics for each individual the social and task networks.
+```{r 1A, echo=FALSE, message=TRUE, paged.print=FALSE}
+
+in_degree_social <- degree(g_social, v = V(g_social), mode = "in", normalized = FALSE)
+in_degree_task <- degree(g_task, v = V(g_task), mode = "in", normalized = FALSE)
+
+out_degree_social <- degree(g_social, v = V(g_social), mode = "out", normalized = FALSE)
+out_degree_task <- degree(g_task, v = V(g_task), mode = "out", normalized = FALSE)
+
+closeness_social <-closeness(g_social,vids = V(g_social),mode = 'total')
+closeness_task <- closeness(g_task, vids = V(g_task),mode = 'total')
+
+betweenness_social <-betweenness(g_social, v = V(g_social), directed = TRUE,)
+betweenness_task <-betweenness(g_task, v = V(g_task), directed = TRUE)
+
+PR_social <- page_rank(g_social, vids = V(g_social), directed = TRUE)
+PR_task <- page_rank(g_task, vids = V(g_task), directed = TRUE)
+
+
+```
+1.(B) Compute the correlations of the five centrality measures you generate for the social network with the five measures generated for the task network. Which measures in the task network are most closely related to those in the socializing network? Name at least one insight can you draw from the relationships between these five measures across the two networks.
+```{r 1B, echo=FALSE}
+cor(in_degree_social,in_degree_task)
+cor(out_degree_social,out_degree_task)
+cor(closeness_social, closeness_task)
+cor(betweenness_social,betweenness_task)
+cor(PR_social$vector, PR_task$vector)
+```
+The closeness centrality in the task network is the most closely related to that in the socializing network.Evne though the correlation between out-degree measures is slightly lower than the closeness centrality, it is also moderately correlated with the corresponding measure in the socializing network with the correlation coefficient of 0.70.
+
+All the centrality matrix pairs from the two networks have positive correlation coefficients. It means that generally, a node that have a high centrality in the socializing network would have a high centrality in the task network. Notice that correlation coefficient for the page rank measure is very low. The two networks are not very similar according to the page rank algorithm. 
+
+
+
+2. Next, consider the social and task ties together, as two distinct types of ties comprising one network.
+
+(A) Suppose that a tie is strong if it is above the mean strength for that type, conditional on the tie existing—do not include weights of 0 in the calculation of the mean. Under this definition, does the network satisfy Strong Triadic Closure? Come up with a solution that illustrates this (1) visually, in a plot, as well as (2) programmatically, by giving the number or proportion of ties that are violation of Strong Triadic Closure.
+
+Visual Solution:
+All the strong ties are highlighted in red. we could check in the graph that, for any two nodes that have red ties with the another node, if there exists any tie between these two nodes.
+```{R 2A(1), echo=FALSE}
+
+mean_social = mean(links_social$weight)
+mean_task = mean(links_task$weight)
+
+links_social$strength = case_when(links_social$weight > mean_social~"strong", links_social$weight <= mean_social~"weak")
+links_task$strength = case_when(links_task$weight > mean_task~"strong",links_task$weight <= mean_task~"weak")
+
+links_new <- rbind(links_social,links_task)
+
+g_mean = graph.data.frame(links_new, vertices = nodes, directed = TRUE)
+colors = E(g_mean)$strength
+colors[colors == "weak"] = "light blue"
+colors[colors == "strong"] = "red"
+E(g_mean)$color = colors
+plot(g_mean, edge.arrow.size=.3)
+
+```
+Programatical Solution:
+The core is to compare the existing ties with all potential ties that could be in a network where the Strong Triadic Closure is satisfied for each node that have a strong relationship. 
+Here is how to find all the potential ties. For each central node that has any strong ties(in or out), find all the other nodes with which it has strong relationship. Among these nodes, create exhaustive pair combination and append them to a matrix. Since the direction counts, the reverse of the pairs would also be collected into the matrix.
+After the matrix of all potential ties is created. A graph with potential ties is generated and the comparison will be achieved with a difference() function.
+
+After the process stated above, eleven violations are found and the edges that violates the Strong Triadic Closure is listed in the result of the next chunk of code. 
+
+```{r 2A1, echo=FALSE}
+
+links_strong_mean = links_new[links_new$strength=='strong',]
+potential_ties <-matrix(ncol = 2)
+unique_from = unique(links_strong_mean$from)
+unique_to = unique(links_strong_mean$to)
+strong_nodes = unique(do.call(c, list(unique_from, unique_to)))
+
+for (i in 1:length(strong_nodes)){
+  links_strong_sub = links_strong_mean[links_strong_mean$from==strong_nodes[i], ]
+  if (length(unique(links_strong_sub$to))>1){
+    combination_matrix <-combn(unique(links_strong_sub$to),m=2)
+    for (j in 1:ncol(combination_matrix) ){
+      node1=combination_matrix[1,j]
+      node2 = combination_matrix[2,j]
+      potential_ties <-rbind(c(node1,node2), potential_ties)
+      potential_ties <-rbind(c(node2,node1), potential_ties)
+    }
+  }
+}
+potential_ties=na.omit(potential_ties)
+potential_ties= potential_ties[!duplicated(potential_ties),]
+
+g_potential <- graph.data.frame(potential_ties, vertices = nodes, directed = TRUE)
+#plot(g_potential)
+
+E(difference(g_potential,g, byname = TRUE))
+
+```
+
+(B) Now suppose that a tie is strong if it is above the median strength for that type, conditional on the tie existing. Under this definition, does the network satisfy Strong Triadic Closure?
+
+```{r}
+median_social = median(links_social$weight)
+median_task = median(links_task$weight)
+
+links_social = links_sub[links_sub$type=='social_tie',]
+links_task = links_sub[links_sub$type=='task_tie',]
+
+links_social$strength = case_when(links_social$weight > median_social~"strong", links_social$weight <= median_social~"weak")
+links_task$strength = case_when(links_task$weight > median_task~"strong",links_task$weight <= median_task~"weak")
+
+links_new2 <- rbind(links_social,links_task)
+
+links_strong_median = links_new2[links_new2$strength=='strong',]
+potential_ties_2 <-matrix(ncol = 2)
+unique_from = unique(links_strong_median$from)
+unique_to = unique(links_strong_median$to)
+strong_nodes = unique(do.call(c, list(unique_from, unique_to)))
+for (i in 1:length(strong_nodes)){
+  links_strong_sub = links_strong_median[links_strong_median$from==strong_nodes[i], ]
+  if (length(unique(links_strong_sub$to))>1){
+    combination_matrix <-combn(unique(links_strong_sub$to),m=2)
+    for (j in 1:ncol(combination_matrix) ){
+      node1=combination_matrix[1,j]
+      node2 = combination_matrix[2,j]
+      potential_ties_2 <-rbind(c(node1,node2), potential_ties_2)
+      potential_ties_2 <-rbind(c(node2,node1), potential_ties_2)
+    }
+  }
+}
+potential_ties_2 = na.omit(potential_ties_2) 
+potential_ties_2 = potential_ties_2[!duplicated(potential_ties_2),]
+
+g_potential_2 <- graph.data.frame(potential_ties_2, vertices = nodes  ,directed = TRUE)
+#plot(g_potential)
+
+E(difference(g_potential_2,g, byname = TRUE))
+
+```
+
+
+```{r, echo=FALSE}
+g_median = graph.data.frame(links_new2, vertices = nodes, directed = TRUE)
+colors = E(g_median)$strength
+colors[colors == "weak"] = "light blue"
+colors[colors == "strong"] = "red"
+E(g_median)$color = colors
+
+plot(g_mean, edge.arrow.size=.3)
+plot(g_median, edge.arrow.size=.3)
+
+plot(g_potential)
+plot(g_potential_2)
+
+```
+Under this definition, the network doesn't satisfy Strong
+Triadic Closure. 
+
+With the mean as a strength cutoff, there are 15 nodes involved in strong relationship, and 29 strong ties With the median as a strength cutoff point, there are 18 nodes involved in storng relationship, and there are 43 strong ties. The medians from both types of edges are lower than the means. So the appearance of more strong nodes/strong ties are expected in the network with the median-cutoff.
+
+There are 75 violations in the median case, which is significantly more than the mean case. The insight is that, given the same network, as more edges are classified as strong ties, there appear more strong triadic closure violations. When there are higher proportion of strong ties, there all more possible ties are needed to make a network satisfy the strong tradic closure, and the difference between exsiting ties and all potential ties is bigger, which implies to more violations.
+
+
+3. Continue to treat the social and task ties as two distinct types ties comprising one network.
+
+(A) It is also possible to compute betweenness on the edges in a network, as well as the vertices. This is a good measure of the flow of information and resources through a network. Calculate the edge-level betweenness for both of the types of tie.
+
+```{r 3A}
+
+C_b_edge_social = edge_betweenness(g_mean, e = E(g_mean)[E(g_mean)$type =='social_tie'], directed = TRUE)
+C_b_edge_task = edge_betweenness(g_mean, e = E(g_mean)[E(g_mean)$type =='task_tie'], directed = TRUE)
+C_b_edge_social
+C_b_edge_task
+```
+(B) Does it seem like edges with high betweenness tend to be strong or weak ties, according to our two definitions above? Does this result make sense?
+
+```{r 3B.1}
+########################## mean-cutoff strength #############################
+# factorize the strength attribute to calculate the correlation coefficients
+strengths_social = E(g_mean)[E(g_mean)$type =='social_tie']$strength
+strengths_social[strengths_social=="strong"]<-1
+strengths_social[strengths_social=="weak"]<-0
+strengths_social <- as.numeric(strengths_social)
+
+strengths_task = E(g_mean)[E(g_mean)$type =='task_tie']$strength
+strengths_task[strengths_task=="strong"]<-1
+strengths_task[strengths_task=="weak"]<-0
+strengths_task <- as.numeric(strengths_task)
+
+cor(C_b_edge_social, strengths_social)
+cor(C_b_edge_task, strengths_task)
+
+########################## median-cutoff strength ############################
+strengths_social = E(g_median)[E(g_median)$type =='social_tie']$strength
+strengths_social[strengths_social=="strong"]<-1
+strengths_social[strengths_social=="weak"]<-0
+strengths_social <- as.numeric(strengths_social)
+
+strengths_task = E(g_median)[E(g_median)$type =='task_tie']$strength
+strengths_task[strengths_task=="strong"]<-1
+strengths_task[strengths_task=="weak"]<-0
+strengths_task <- as.numeric(strengths_task)
+
+cor(C_b_edge_social, strengths_social)
+cor(C_b_edge_task, strengths_task)
+
+```
+As shown above, the edge-level betweenness have negative correlations with the strength attributes in both the mean-cutoff and the median-cutoff cases. It implies that the edge-level betweenness is not a good indicator of the strength of the edges. However, as shown below, the edge-level betweenness also have negative correlations with the weights. It makes sense because the strength attributes was built based on the weight of ties. 
+
+The statement that the betweenness doesn't indicate the strength of ties is not intuitive. Normally, a tie that has high betweenness should be considered important and should have heavier weight. However, it is not completely impossible. No further information is given how the weight is determined for this graph data. There are many approaches of determining the weight, such as prior knowledge, domain knowledge, or even other algorithms, that would produce such a counter-intuitive phenomenon. 
+
+```{r 3B.2}
+cor(C_b_edge_social, E(g_mean)[E(g_mean)$type =='social_tie']$weight)
+cor(C_b_edge_task, E(g_mean)[E(g_mean)$type =='task_tie']$weight)
+cor(C_b_edge_social, E(g_median)[E(g_median)$type =='social_tie']$weight)
+cor(C_b_edge_task, E(g_median)[E(g_median)$type =='task_tie']$weight)
+```
+4. Continue to treat the social and task ties as two distinct types of ties comprising one network. How many pairs of nodes do not have walks between one another? Find a solution that performs this calculation directly on the matrix—it is possible to verify this solution via igraph afterward.
+
+There are 59 pairs of nodes that do not have walks between one another.
+
+I have tried two approaches that perform the calculations on matrix.
+
+THe first approach exhaustively finds all walks of the graph. There are 105 edges in the graph, so theoretically, the maximal walks is 105. Taking the power of 1 to 105 for the adjacent matrix will found all the possible walks in the graph. Summing the matrix at each degree of power will results in a accumulative matrix that store the total number of possible paths up to the walk number/the degree of the degree. The zero in the accumulative matrix means that there exists  no walk between the node of the row index and the node of the column index. Then we will count all 0's in the accumulative matrix by looping though every position in the accumulative matrix.
+
+Note that the count number from this approach is 119, which doesn't correspond to my second approach and the verification from the graph. I have carefully checked the logic of the approach and the implementation(the code), but still didn't find out what is wrong. I just included this part of work to show the idea.
+
+```{r 4.1}
+adj_matrix = as.matrix(as_adjacency_matrix(g))
+
+matrix_accumulate = matrix(0, nrow = 22, ncol=22)
+
+for (power in 1:105){
+  matrix_power = matrix.power(adj_matrix,power)
+  matrix_accumulate = matrix_accumulate + matrix_power
+}
+
+count =0
+for (i in (1:22)){
+  for (j in (1:22)){
+    if (matrix_accumulate[i,j] <=0 ) {
+      #print(c(i,j))
+      count =count+1
+    }
+  }
+}
+count
+
+```
+The second approach calculates the distance among all nodes. If the distance between two nodes is infinity, it means that there exists no path between them.
+
+```{r 4.2}
+unreach_count = 0
+distance_table=distances(g)
+
+for (i in 1:nrow(distance_table)){
+  for (j in 1:ncol(distance_table)){
+    if (distance_table[i,j]=="Inf"){
+      #unreach_matrix = rbind(unreach_matrix, c(nodes[i],nodes[j]))
+      unreach_count = unreach_count+1
+    }
+  }
+}
+unreach_count
+```
+The following approach is inspired by the content from the lecture slides "If
+𝑣𝑖𝑗=0 and in the original matrix, and 𝑣𝑖𝑗> 0 in the matrix to the power of 2, then there exists a shortest path of two between 𝑣𝑖and 𝑣𝑗".
+
+However, I think this approach is not quite right because it omit the situation where the shortest path is larger than 2. 
+If the shortest path between two nodes is a number greater than 2, 𝑣𝑖𝑗 in the adjacent matrix to the power of 2 will still be zero, but it doesn't mean that the nodes are not connected. 
+It will make my approach 1 (finding all exhaustive walks and summing matrix of each degree of power) more advantageous than this approach.
+```{r}
+adj_matrix = as.matrix(as_adjacency_matrix(g))
+adj_matrix_sec = adj_matrix %*% adj_matrix
+
+count =0
+for (i in 1:22){
+  for (j in 1:22){
+    if ((adj_matrix[i,j]==0) & (adj_matrix_sec[i,j]<=0)) {
+      unreach_matrix_adj = rbind(unreach_matrix_adj, c(i,j))
+      count =count+1}}
+}
+count
+
+```
+Verify my solutions via igraph.
+```{r 4.3}
+dist_table = distance_table(g)
+dist_table$unconnected
+```
+
+
+5. The network-level measure of degree centrality is a good indicator of the dispersion of the degree distribution in a network. Generate and plot a network in R in which the network-level measure of degree centrality is equal to 1, and another where it is equal to 0. Would this relationship hold true for these
+networks for other measures of centrality, such as closeness or betweenness?
+
+I made both graphs both with 10 nodes and as undirected to make comparison easier.
+For the graph that has network-level degree centrality of 0, all nodes will have maximal degree centrality at the node level. A full graph satisfies such a condition. When degree centrality is 0, each node will have the same degree centrality. The dispersion of the degree distribution in the network is low
+
+For the graph that has network-level degree centrality of 1, Simga(C_degree(V*)- C_degree(vi)) = (n-1)(n-2). 
+Let C_degree(V*) = 9. Then C_degree(vi) should be 1 for each i.
+(9-9)+9(9-1)/((10-1)(10-2))=1. When degree centrality is 1, there is one node that is very powerful and centralized, while the other nodes are less powerful(lower degree centrality). The dispersion of the
+degree distribution in the network is high.
+
+
+
+```{r 5.1, echo=FALSE}
+full = make_full_graph(10)
+plot(full)
+degree_q5_1 <- degree(full)
+
+# verifying that the graph-level degree centrality is 0
+sum =0
+max_C_d = max(degree_q5_1)
+for (i in 1:length(degree_q5_1)){
+  temp = (max(degree_q5_1) - degree_q5_1[i])/ (9*8)
+  sum = temp+sum
+}
+sum
+
+```
+
+
+```{r 5.2, echo=FALSE}
+C_d_df = data.frame('from' = rep(1,9), 'to'=seq(2,10))
+g_star = graph.data.frame(C_d_df, vertices = seq(1,10),directed = FALSE)
+plot(g_star)
+
+degree_star <- degree(g_star)
+
+# verifying that the graph-level degree centrality is 0
+sum = 0
+max_C_d = max(degree_star)
+for (i in 1:length(degree_star)){
+  temp = (max(degree_star) - degree_star[i])/ (9*8)
+  sum = temp+sum
+}
+as.numeric(sum)
+
+```
+
+The relationship hold true for other measures of centrality.
+The full graph has the network-level degree centrality of 0 and the star graph has that of 1. It means that the star graph has a more disperse distribution of centrality measures. As shown below, the betweenness centrality of the star graph has a bigger range than that of the full graph. Also, the standard deviation of the star graph's closeness centrality is that of the full graph's.
+
+```{r}
+bt_full <- betweenness(full)
+cn_full <- closeness(full)
+bt_full
+cn_full
+
+bt_star <- betweenness(g_C_d_1)
+cn_star <- closeness(g_C_d_1)
+bt_star
+cn_star
+
+
+range(bt_full)
+range(bt_star)
+
+sd(cn_full)
+sd(cn_star)
+
+
+```
