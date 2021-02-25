@@ -1,0 +1,594 @@
+
+```{r}
+library(data.table)
+library(igraph)
+library(stringr)
+library(splitstackshape)
+library(plotly)
+library(network)
+library(lubridate)
+library(readxl)
+library(lubridate)
+library(dplyr)
+library(parallel)
+```
+
+```{r}
+#import the data
+invest1 <- fread("C:/Users/10331/OneDrive/Desktop/Funding_events_7.14.csv",header = TRUE)
+invest2 <- fread("C:/Users/10331/OneDrive/Desktop/Funding_events_7.14_page2.csv",header = TRUE)
+```
+
+```{r}
+perform <- fread("C:/Users/10331/OneDrive/Desktop/Venture_capital_firm_outcomes.csv",header = TRUE)
+```
+
+```{r}
+#combine the tables
+invest <- rbindlist(list(invest1,invest2))
+head(invest)
+```
+
+```{r}
+#Question1
+
+#For this question, we only have to create a simple igraph. However, for question 2-5, I decided to create a large edge list with all possible combinations, grouping by each time period and excluding the decaying interactions.
+
+library(lubridate)
+
+#transform deal date to date format, and floor it to month for simpler calculations
+invest$date <- mdy(invest$`Deal Date`)
+invest$month <- floor_date(invest$date,"month")
+```
+
+```{r}
+#set a label for each investment by rowid
+invest$id <- row.names(invest)
+#preview the data
+head(invest)
+```
+
+```{r}
+#drew the relevant info for analysis to a new dataframe, and preview the dataframe
+df <- data.table(investor = invest$Investors, id = invest$id, month = invest$month)
+head(df)
+```
+
+```{r}
+#correct the formatting of investors to avoid dupelicates and split the investors into separated columns
+df$investor <- str_replace_all(df$investor, ",Inc", "Inc")
+df$investor <- str_replace_all(df$investor, ", Inc", "Inc")
+
+df$investor <- str_replace_all(df$investor, ",Ltd", "Ltd")
+df$investor <- str_replace_all(df$investor, ", Ltd", "Ltd")
+
+df$investor <- str_replace_all(df$investor, ",LLC", "LLC")
+df$investor <- str_replace_all(df$investor, ", LLC", "LLC")
+
+df$investor <- str_replace_all(df$investor, ",LP", "LP")
+df$investor <- str_replace_all(df$investor, ", LP", "LP")
+
+df$investor <- str_replace_all(df$investor, ",L.P", "L.P")
+df$investor <- str_replace_all(df$investor, ", L.P", "L.P")
+
+df$investor <- str_replace_all(df$investor, ",S.A", "S.A")
+df$investor <- str_replace_all(df$investor, ", S.A.", "S.A")
+
+df$investor <- str_replace_all(df$investor, ",Corp", "Corp")
+df$investor <- str_replace_all(df$investor, ", Corp", "Corp")
+
+df$investor <- str_replace_all(df$investor, ",a.s.", "a.s.")
+df$investor <- str_replace_all(df$investor, ", a.s.", "a.s.")
+
+df$investor <- str_replace_all(df$investor, ",llc", "llc")
+df$investor <- str_replace_all(df$investor, ", llc", "llc")
+
+df$investor <- str_replace_all(df$investor, ",LTD", "LTD")
+df$investor <- str_replace_all(df$investor, ", LTD", "LTD")
+
+df$investor <- str_replace_all(df$investor, ",corp", "corp")
+df$investor <- str_replace_all(df$investor, ", corp", "corp")
+
+df$investor <- str_replace_all(df$investor, ",Co.", "Co.")
+df$investor <- str_replace_all(df$investor, ", Co.", "Co.")
+
+df <- cSplit(df,"investor",",")
+
+#preview the data
+head(df)
+```
+
+```{r}
+#make it into a huge pair lists of interactions
+pairs <- lapply(seq_len(nrow(df)),function(i) t(df[i,]))
+```
+
+```{r}
+#collapse empty columns and reduce the size of whole list, also simplfy the process later on to find all ties.
+for (i in seq_along(pairs)){
+  pairs[[i]] <- pairs[[i]][!is.na(pairs[[i]])]
+}
+
+#preview the list
+head(pairs)
+```
+
+```{r}
+#create a reference for spliting pair lists by time period.
+months <- seq.Date(min(invest$month),max(invest$month),by="month")
+```
+
+```{r}
+#find all ties, by filtering out the investment that has only one investor
+tmp <- sapply(seq_along(pairs), function(i) length(pairs[[i]])>3)
+```
+
+```{r}
+#use the index just created to filter the data
+pairs <- pairs[tmp]
+```
+
+```{r}
+#create a edge list out of the pair list, reduce the redundant columns
+ties <- lapply(seq_along(pairs), function(i) data.table(t(combn(pairs[[i]][-c(1,2)],2)), id = pairs[[i]][1], month = pairs[[i]][2]))
+```
+
+```{r}
+#Combine all the sub-lists in the one list
+ties <- rbindlist(ties)
+```
+
+```{r}
+#change the labels
+colnames(ties)[1:2] = c("from","to") 
+```
+
+```{r}
+#reorder the data by from/to/month to perform calculation on date
+setorderv(ties,c("from","to","month"))
+
+#preview the ties
+head(ties)
+```
+
+```{r}
+#find all the previous time of interaction
+ties[,previous := c(NA,month[-.N]),by = c("from","to")]
+```
+
+```{r}
+#find out the time diff between previous and later interactions
+ties$interval <- round(difftime(ties$month,ties$previous,units = "days"))
+```
+
+```{r}
+#find the threshold of 90% quantile
+ties$threshold = quantile(ties$interval,.9,na.rm = TRUE)
+```
+
+```{r}
+#assign 0 to new interactions to aviod null/inf
+ties[is.na(ties$interval),"interval"] = 0
+```
+
+```{r}
+#find how many times each tie repeated
+ties[,repeated := seq_len(.N)-1,by=c("from","to")]
+
+#calcualte cumulative successes
+ties[,year:= year(month)]
+colnames(perform)[1] <- "investor"
+perform2 <- perform[,1:3]
+perform2[,successful_investments:= cumsum(successful_investments), by = investor]
+colnames(perform2)[3] = "cumulative"
+
+#preview the ties
+head(ties)
+```
+
+```{r}
+#create a edge list that contain lists of interactions before specific dates
+edges = lapply(seq_along(months), function(i) ties[month <= months[i]])
+```
+
+```{r}
+#figure out the tie ages
+edges = lapply(seq_along(months), function(i) edges[[i]][, tie_age := round(difftime(months[i],month,units = "days"))])
+```
+
+```{r}
+#filtering out those are decaying
+edges = lapply(seq_along(months), function(i) edges[[i]][tie_age <= threshold,])
+```
+
+```{r}
+#Generate a igraph
+g = lapply(seq_along(edges), function(i) graph.data.frame(edges[[i]][,c("from","to","repeated","tie_age")],directed = FALSE))
+```
+
+```{r}
+#find the month 2014 July's igraph
+tmp <- which(months == "2014-7-1")
+g1 = g[[tmp]]
+g1
+```
+
+```{r}
+#find the most central company based on Max closeness
+close1 = closeness(g1, mode = "total")
+tmp = which(close1==max(close1))
+close1[tmp]
+```
+```{r}
+#find the most central company based on Min average path
+avg_path = distances(g1)
+avg_path[avg_path == Inf] = nrow(avg_path)
+avg_path = apply(avg_path,1,mean)
+tmp = which(avg_path==min(avg_path))
+avg_path[tmp]
+```
+By both min average path and max closeness, Kleiner Perkins Caufield & Byers is the most central firm in the network.
+
+```{r}
+#Question2
+
+#for this question, we want to fin the coreness for each month and then plot out the graph.
+
+#calculate the coreness for each month's igraph
+tmp <- lapply(seq_along(g), function(i) mean(coreness(g[[i]])))
+```
+
+```{r}
+#plot the coreness over time
+plot(months, tmp, type = 'l',
+     xlab = 'Months', ylab = "Average Coreness", main = 'Local Density of the Network Over Time')
+```
+```{r}
+#filtering out repeated relationships to get unique ties
+tmp<- lapply(seq_along(g), function(i) simplify(g[[i]],remove.multiple = TRUE))
+tmp <- lapply(seq_along(tmp), function(i) mean(coreness(tmp[[i]])))
+```
+
+```{r}
+#plot the coreness of unique ties over time
+plot(months, tmp, type = 'l',
+     xlab = 'Months', ylab = "Average Coreness", main = 'Local Density of the Network Over Time (Unique ties)')
+```
+Two figures looks nearly identical in shape for the part before 2000.
+For the part after 2000, the figure for unique ties has relatively lower value and slightly different shape.
+It might suggest that, at the beginning, the investment companies were forming unique ties and small groups.
+Then the companies from different groups starts to link, which links the groups they from as well and formed a core.
+As a complex group/core formed, the companies with in the group tend to co-invest which won't provide as much unique tie.
+So the shape in the later part gets lower, because co-invest creates repeated ties instead of unique ties.
+
+```{r}
+# Question3
+#(A)
+# for simplify the problem, we first select one month from each year before calculate correlation to compute concentration scores. Concentration score comparing to ideal  core-periphery structure with each partition size p should give a nice idea of this question.
+
+#Get all the July's index from each year
+tmp <- seq(from = 2, to = length(months), by = 12)
+
+# Use the influence-based similarity (Eigenvector Centrality) to measure the Global Coreness
+eigen<- lapply(seq_along(tmp), 
+               function(i) data.table(
+                 node = V(g[[tmp[i]]])$name,
+                 eigen_centrality = eigen_centrality(g[[tmp[i]]])$vector,
+                 year = i))
+eigen <- rbindlist(eigen)
+```
+
+```{r}
+# reorder the table with the month(ascending) and eigen_centrality(descending)
+setorderv(eigen,c('year','eigen_centrality'), c(1,-1))
+
+#preview the table
+head(eigen)
+```
+
+```{r}
+# calculate the concentration by correlation between the computed actual coreness scores (eigenvector centrality) and the ideal coreness score
+
+corr = lapply(seq_along(tmp),function(i)
+  sapply(seq_len(nrow(eigen[year==i])),function(j) 
+    cor(eigen[year==i, eigen_centrality],
+        c(rep(1,j),rep(0,nrow(eigen[year==i])-j)))
+         )
+  )
+```
+
+```{r}
+#reformat the table for plotting
+cov_dt<- lapply(seq_along(corr), function(i) 
+  data.table(index = seq_along(corr[[i]]),
+             concentration = corr[[i]],
+             year = i))
+cov_dt <- rbindlist(cov_dt)
+cov_dt[,prop:= index/max(index), by =year]
+
+#preview the table
+head(cov_dt)
+```
+
+```{r}
+# plot the range of concentration scores for each partition size p 
+plts <- lapply(seq_along(tmp), function(i)
+  ggplot(cov_dt[year==i])+
+  geom_point(aes(x = prop, y = concentration))+
+  ggtitle(paste('Year:', 1980+i))+
+    xlab("Proportion in Core")+ 
+    ylab("Concentration"))
+plts
+```
+By the plots of concentration, we can clearly see that at the beginning the graphs are more speaded out. The high correlation happens at middle of the graph, indicating that there might not be a core, or might be mutiple small groups/cores.
+As year increasing, we can see that the correlation are more and more skew to the left, indicating the core-periphery structures are more and more developed and clear.
+
+```{r}
+#(B)
+# Solution 1: measure dispersion of closeness
+
+#calculate closeness for each year
+close <- lapply(seq_along(tmp), function(i) closeness(g[[tmp[i]]]))
+
+#plot the histgram for each year
+lapply(seq_along(close), function(i) hist(close[[i]],xlab = 'Closeness', main = paste('Closeness Centrality', 1980+i)))
+```
+Based on the distribution of closeness centrality, we can tell as the year increase the histograms become more and more separated in to two distinguished bars.
+The right bar get larger and larger, which means more and more nodes have large closeness. 
+And there are still some nodes have small closeness at the left.
+This tells us There's a core getting bigger and bigger and still some periphery around it. 
+
+```{r}
+#Solution2: Multidimensional scaling
+
+#produce distance matrix for each
+dist <- lapply(seq_along(tmp), function(i) distances(g[[tmp[i]]]))
+
+#replace Inf with 5 to aviod errors while scaling
+for (i in seq_along(dist)){
+  dist[[i]][dist[[i]] == Inf] = 5
+}
+
+#do a 2 dimension scaling by distances, the last 10 years taking way too long and the map is messy
+#so here I use the first 22 years as an example
+dist2 <- lapply(1:22, function(i) cmdscale(dist[[i]], k = 2)) 
+```
+
+```{r}
+#plotting the dimension scaling graphs of first 22 years
+lapply(seq_along(dist2), function(i)
+  plot(dist2[[i]][,1], dist2[[i]][,2], type = "n", xlab = "", ylab = "", axes = FALSE, main = paste("Multidimensional scaling", 1980+i)) +
+  text(dist2[[i]][,1], dist2[[i]][,2], cex = 0.9, xpd = TRUE)
+)
+```
+We could clearly see that the companies were first seprated, then formed small groups.
+Then some companies within those groups link, which link the groups together and formed a core.
+Then it formed a core-periphery structure.
+
+```{r}
+#Extra credit: show visually through development of well-defined core in the network to reveal the core-periphery
+library(animation)
+library(magick)
+
+#create a function to potentially generate all the graphs needed by each month
+plot_time_series = function(g, m){
+  for (i in seq_along(m)){
+    layout(matrix(c(1, 2, 1, 3), 2,2, byrow = TRUE), widths=c(3,1), heights=c(1, 1))
+    plot(simplify(g[[m[i]]],remove.multiple = TRUE,remove.loops = TRUE),
+         vertex.label= "", main = paste("Interaction at month:", m[i]))
+  }
+}
+
+#create a index/mapper to select the months that we want to display, here I decide to display a month's for every 4 months to reduce the amont of computation needed
+map <- seq(from = 2, to = (length(months) - 167), by = 4)
+
+#here I input the function to GIF function, which gonna produce a GIF and save it to local.
+#This should produce a simple animation that how a core-periphery forming in this network over time.
+saveGIF({
+  ani.options(interval = 0.5, convert = shQuote("C:/Program Files/ImageMagick-6.9.9-Q16-HDRI/convert.exe"))
+  plot_time_series(g,map)
+}, ani.width = 800, ani.height = 500)
+
+gif <- image_read("C:/Users/10331/OneDrive/Desktop/animation.gif")
+gif
+```
+
+```{r}
+#Question4
+#(A)
+
+#For this question, we calculate degree centrality, closeness centrality, betweenness centrality, eigenvector centrality, and PageRank centrality first, then perform anova analysis to see the significance, direction and strength.
+
+#calculate degree centrality for each month
+degree <- lapply(seq_along(g), function(i) 
+  data.table(investor = V(g[[i]])$name,
+             degree = degree(g[[i]], mode = 'all'),
+             year = year(months[i])
+               ))
+degree <- rbindlist(degree,fill=TRUE)
+```
+
+```{r}
+#calculate closeness centrality for each month
+close2<- lapply(seq_along(g), function(i) 
+  data.table(investor = V(g[[i]])$name,
+             closeness = closeness(g[[i]]),
+             year = year(months[i])))
+close2 <- rbindlist(close2,fill=TRUE)
+```
+
+```{r}
+#calculate betweenness centrality for each month
+betw <- lapply(seq_along(g), function(i) 
+  data.table(investor = V(g[[i]])$name,
+             betweenness = betweenness(g[[i]]),
+             year = year(months[i])))
+betw <- rbindlist(betw,fill=TRUE)
+```
+
+```{r}
+#calculate page_rank centrality for each month
+pr <- lapply(seq_along(g), function(i) 
+  data.table(investor = V(g[[i]])$name,
+             page_rank = page_rank(g[[i]])$vector,
+             month = i,
+             year = year(months[i])))
+pr <- rbindlist(pr,fill=TRUE)
+```
+
+```{r}
+#calculate  eigenvector centrality for each month
+ec <- lapply(seq_along(g), function(i) 
+  data.table(investor = V(g[[i]])$name,
+             eigen_centrality = eigen_centrality(g[[i]])$vector,
+             month = i,
+             year = year(months[i])))
+ec <- rbindlist(ec,fill=TRUE)
+```
+
+```{r}
+#Merge all the centrality scores to one table
+dt2 <- degree
+dt2$closeness <- close2$closeness
+dt2$betweenness <- betw$betweenness
+dt2$page_rank <- pr$page_rank
+dt2$eigen_centrality <- ec$eigen_centrality
+
+#preview the table
+head(dt2)  
+```
+
+```{r}
+#calculate the last value in the year grouped by company
+dt2[,degree := tail(degree,1),by = c("investor","year")]
+dt2[,closeness := tail(closeness,1),by = c("investor","year")]
+dt2[,betweenness := tail(betweenness,1),by = c("investor","year")]
+dt2[,page_rank := tail(page_rank,1),by = c("investor","year")]
+dt2[,eigen_centrality := tail(eigen_centrality,1),by = c("investor","year")]
+dt2 <- distinct(dt2)
+
+#preview the new table
+head(dt2)
+```
+
+```{r}
+#Join the data with performance scores
+colnames(perform)[1]="investor"
+dt2 <- inner_join(dt2, perform, by = c("investor","year"))[,1:9]
+
+#preview the new table
+tail(dt2)
+```
+
+```{r}
+library(pscl)
+library(MASS)
+
+#Performance a glm model, as recommended during office hour, on the successful_investment
+glm <- glm(data = dt2, formula = successful_investments ~ degree + betweenness + page_rank + closeness + eigen_centrality)
+
+#There are other options for prediction such as hurdle and zero-inflation, however, they produce runtime error on this dataset and won't provide full anova result to analysis, so I didn't apply them here.
+
+#performance anova analysis
+summary(glm)
+```
+We can clearly see that four measures are significant in explaining number of successful_investments except closeness.
+Based on the results, degree/betweenness/page_rank have significant positive relationship with successful_investments.
+Among the three, page_rank is the most strong positively related indicator based on coefficent.
+eigen_centrality presents here as a relatively strong negatively related indicator based on coefficent.
+Degree and betweenness are relatively weaker indicators but still significant.
+
+```{r}
+#(B)
+##performance a glm model, as recommended during office hour, on the out_of_business
+glm_out <- glm(data = dt2, formula = out_of_business ~ degree + closeness + betweenness + page_rank + eigen_centrality)
+
+#There are other options for prediction such as random forest, however, tree model won't provide full anova result to analysis, so I didn't apply them here.
+
+#performance anova analysis
+summary(glm_out)
+```
+We can clearly see that four measures are significant in explaining number of out_of_business, except eigen_centrality.
+Based on the results, betweenness/closeness have a positive relationship with out_of_business.
+Among the two, closeness is the most strong positively related indicator based on coefficent.
+Page_rank presents here as a strong negatively related indicator based on coefficent.
+Degree and betweenness are relatively weaker indicators but still significant.
+
+```{r}
+#Question5
+
+#first, get igraphs of each year's july
+g5 <- lapply(seq_along(tmp), function(i) g[[tmp[i]]])
+```
+
+```{r}
+#use ego graphs to find all the neighborhoods in each months
+ego_graph <-lapply(seq_along(g5), function(i) make_ego_graph(g5[[i]], mode = 'all', nodes = V(g5[[i]])))
+```
+
+```{r}
+#Create a list for all companies in the for all ego_graph and corresponding months
+namelist <- lapply(seq_along(g5), function(i) list(V(g5[[i]])$name))
+namelist <- rbindlist(namelist)
+monthlist <- lapply(seq_along(g5), function(i) list(rep(tmp[i],length(V(g5[[i]])$name))))
+monthlist <- rbindlist(monthlist)
+dt3 <- data.table(investor = namelist, month = monthlist)
+colnames(dt3)<- c("investor","month")
+#find all the corresponding year
+dt3[, year:= year(months[month])]
+```
+
+```{r}
+#calculate density/constraint/repeated ties/number of firms, and import into a datatable
+neigh_measures <- lapply(seq_along(ego_graph), 
+        function(i) lapply(seq_along(ego_graph[[i]]), 
+        function(j) data.table(edge_density = edge_density(ego_graph[[i]][[j]], loops=FALSE),
+                        avg_constraint = mean(constraint(ego_graph[[i]][[j]], weights=NULL)),
+                        average_repeated_ties = mean(E(ego_graph[[i]][[j]])$repeated),
+                        number_of_firms = length(V(ego_graph[[i]][[j]])$name),
+                        avg_age = mean(E(ego_graph[[i]][[j]])$tie_age)
+        )
+))
+
+#collapse the huge datatable into a long table
+neigh_measures <- lapply(seq_along(neigh_measures), function(i) rbindlist(neigh_measures[[i]]))
+neigh_measures2 = data.table()
+for (i in seq_along(neigh_measures)){
+ neigh_measures2 = rbind(neigh_measures2, neigh_measures[[i]]) 
+}
+
+#combine the name table and the measure table
+dt4 <- cbind(dt3, neigh_measures2)
+
+#innerjoin with performance
+dt4 <- inner_join(dt4, perform, by = c("investor","year"))[,1:10]
+
+#innerjoin with average cumulative success
+dt4 <- inner_join(dt4, perform2, by = c("investor","year"))
+```
+
+```{r}
+#Performance a glm model, as recommended during office hour, on the successful_investment
+glm <- glm(data = dt4, formula = successful_investments ~ edge_density + avg_constraint + average_repeated_ties + number_of_firms + avg_age + cumulative)
+
+#performance anova analysis
+summary(glm)
+```
+We can clearly see that all six measures are significant in explaining number of successful_investments.
+Based on the results, edge_density/cumulative//number_of_firms have significant positive relationship with successful_investments.
+Among the three, cumulative success is the most strong positively related indicator based on coefficent, followed by edge_density.
+avg_constraint presents here as a strong negatively correlated indicator based on coefficent.
+average_repeated_ties/number_of_firms/avg_age are relatively weaker indicators but still significant.
+
+```{r}
+##performance a glm model, as recommended during office hour, on the out_of_business
+glm_out <- glm(data = dt4, formula = out_of_business ~ edge_density + avg_constraint + average_repeated_ties + number_of_firms + avg_age + cumulative)
+
+#performance anova analysis
+summary(glm_out)
+```
+We can clearly see that all six measures are significant in explaining number of out_of_business.
+Based on the results, edge_density/avg_constraint/cumulative have a positive relationship with out_of_business.
+Among the three, avg_constraint is the relatively strong positively related indicator based on coefficent, followed by edge_density.
+average_repeated_ties here as a relatively strong negatively related indicator based on coefficent.
+cumulative/number_of_firms/avg_age presents are relatively weaker indicators but still significant.
